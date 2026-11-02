@@ -1,0 +1,215 @@
+package bf.nt.parolesvivantes
+
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+
+data class Visit(val book: String, val chapter: Int, val at: Long, val millis: Long)
+
+fun loadVisits(prefs: android.content.SharedPreferences): List<Visit> =
+    prefs.all.entries.filter { it.key.startsWith("visit.") }.mapNotNull { entry ->
+        val parts = entry.key.removePrefix("visit.").split(".")
+        if (parts.size != 2) return@mapNotNull null
+        val ch = parts[1].toIntOrNull() ?: return@mapNotNull null
+        Visit(parts[0], ch, entry.value as? Long ?: 0L, prefs.readMillis(parts[0], ch))
+    }.sortedByDescending { it.at }
+
+@Composable
+fun JournalScreen(
+    b: Bible,
+    revision: Int,
+    onBack: () -> Unit,
+    onSeeProgress: () -> Unit,
+    onSeeHistory: () -> Unit,
+    onSeeMarks: () -> Unit,
+    onMenu: () -> Unit
+) {
+    val ink = LocalInk.current
+    val ctx = localContext()
+    val prefs = remember { ctx.ntPrefs() }
+    val readCount = remember(revision) { prefs.all.count { it.key.startsWith("read.") && it.value == true } }
+    val visits = remember(revision) { loadVisits(prefs).take(4) }
+    val marks = remember(revision) { prefs.getStringSet("favorites", emptySet())!!.toList().take(4) }
+    val total = b.books.sumOf { it.chapters }
+    val percent = if (total == 0) 0 else (readCount * 100 / total)
+
+    Column(Modifier.fillMaxSize().background(ink.bg)) {
+        Row(
+            Modifier.statusBarsPadding().fillMaxWidth().height(54.dp).padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircleIconButton(R.drawable.ic_arrow_back, "Retour", onBack, ink.text, 42.dp, iconSize = 21.dp)
+            Text("Journal de lecture", Modifier.weight(1f), color = ink.text, fontSize = 17.sp, fontFamily = Lora, fontWeight = FontWeight.SemiBold)
+            CircleIconButton(R.drawable.ic_menu, "Menu", onMenu, ink.text, 40.dp, iconSize = 20.dp)
+        }
+        LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 18.dp, vertical = 6.dp)) {
+            item("progress") {
+                Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+                    SectionHeader("Progression de Lecture", onSeeProgress)
+                    Spacer(Modifier.height(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier.size(38.dp).clip(RoundedCornerShape(10.dp)).background(ColorTone(0xFF4F5E33)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("NT", color = ColorTone(0xFFF1EBD9), fontSize = 11.sp, fontFamily = Lora, fontWeight = FontWeight.SemiBold)
+                        }
+                        Spacer(Modifier.width(14.dp))
+                        Text("Nouveau Testament", Modifier.weight(1f), color = ink.text, fontSize = 14.5.sp, fontFamily = Lora)
+                        Text("$percent%", color = ink.text.copy(alpha = .8f), fontSize = 14.sp, fontFamily = Lora)
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    LinearProgressIndicator(
+                        progress = { readCount / total.toFloat().coerceAtLeast(1f) },
+                        modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(3.dp)),
+                        color = ink.gold,
+                        trackColor = ink.line
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text("$readCount chapitres sur $total", color = ink.sub, fontSize = 11.5.sp, fontFamily = Lora)
+                }
+            }
+            item("divider-1") { HairLine(ink.line, Modifier.padding(vertical = 12.dp)) }
+            item("history") {
+                Column {
+                    SectionHeader("Historique de Lecture", onSeeHistory)
+                    Spacer(Modifier.height(10.dp))
+                    if (visits.isEmpty()) EmptyState("Vos chapitres lus apparaîtront ici.")
+                    else visits.forEachIndexed { index, visit -> HistoryRow(b, visit, index, visits.size) }
+                }
+            }
+            item("divider-2") { HairLine(ink.line, Modifier.padding(vertical = 12.dp)) }
+            item("marks") {
+                Column {
+                    SectionHeader("Mes Signets", onSeeMarks)
+                    Spacer(Modifier.height(12.dp))
+                    if (marks.isEmpty()) EmptyState("Aucun signet pour le moment.")
+                    else marks.forEach { key ->
+                        val verse = remember(key) { b.verse(key) }
+                        if (verse != null) {
+                            val c = prefs.getInt("color.$key", 1).coerceIn(0, 5)
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onSeeMarks() }
+                                    .padding(vertical = 9.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                BookmarkRibbon(bookmarkAccents[c], 13.dp, 18.dp)
+                                Spacer(Modifier.width(14.dp))
+                                Text(b.ref(verse), color = ink.text, fontSize = 14.sp, fontFamily = Lora)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryRow(b: Bible, visit: Visit, index: Int, count: Int) {
+    val ink = LocalInk.current
+    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+        Box(Modifier.width(26.dp).fillMaxHeight()) {
+            Canvas(Modifier.fillMaxSize()) {
+                val x = size.width / 2f
+                if (index < count - 1) drawLine(ink.line, Offset(x, size.height / 2f), Offset(x, size.height), 1.5f)
+                if (index > 0) drawLine(ink.line, Offset(x, 0f), Offset(x, size.height / 2f), 1.5f)
+                drawCircle(if (index == 0) ink.faint else ink.gold, radius = if (index == 0) 5f else 4f, center = Offset(x, size.height / 2f))
+            }
+        }
+        Row(
+            Modifier.weight(1f).padding(vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("${b.nameOf(visit.book)} ${visit.chapter}", color = ink.text, fontSize = 14.5.sp, fontFamily = Lora)
+            Spacer(Modifier.weight(1f))
+            Text(formatDuration(visit.millis), color = ink.text.copy(alpha = .7f), fontSize = 12.5.sp, fontFamily = Lora)
+        }
+    }
+}
+
+@Composable
+fun ProgressScreen(b: Bible, revision: Int, onBack: () -> Unit) {
+    val ink = LocalInk.current
+    val ctx = localContext()
+    val prefs = remember { ctx.ntPrefs() }
+    Column(Modifier.fillMaxSize().background(ink.bg)) {
+        Row(
+            Modifier.statusBarsPadding().fillMaxWidth().height(54.dp).padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircleIconButton(R.drawable.ic_arrow_back, "Retour", onBack, ink.text, 42.dp, iconSize = 21.dp)
+            Text("Progression de Lecture", color = ink.text, fontSize = 17.sp, fontFamily = Lora, fontWeight = FontWeight.SemiBold)
+        }
+        LazyColumn(contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)) {
+            items(b.books, key = { it.id }) { book ->
+                val read = remember(revision, book.id) { (1..book.chapters).count { prefs.getBoolean("read.${book.id}.$it", false) } }
+                Column(Modifier.padding(vertical = 9.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(book.name, Modifier.weight(1f), color = ink.text, fontSize = 14.5.sp, fontFamily = Lora)
+                        Text("$read / ${book.chapters}", color = ink.sub, fontSize = 12.5.sp, fontFamily = Lora)
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    LinearProgressIndicator(
+                        progress = { read / book.chapters.toFloat().coerceAtLeast(1f) },
+                        modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(3.dp)),
+                        color = ink.gold,
+                        trackColor = ink.line
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun HistoryScreen(b: Bible, revision: Int, onBack: () -> Unit) {
+    val ink = LocalInk.current
+    val ctx = localContext()
+    val prefs = remember { ctx.ntPrefs() }
+    val visits = remember(revision) { loadVisits(prefs).take(200) }
+    Column(Modifier.fillMaxSize().background(ink.bg)) {
+        Row(
+            Modifier.statusBarsPadding().fillMaxWidth().height(54.dp).padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircleIconButton(R.drawable.ic_arrow_back, "Retour", onBack, ink.text, 42.dp, iconSize = 21.dp)
+            Text("Historique de Lecture", color = ink.text, fontSize = 17.sp, fontFamily = Lora, fontWeight = FontWeight.SemiBold)
+        }
+        if (visits.isEmpty()) EmptyState("Vos chapitres lus apparaîtront ici.", Modifier.padding(horizontal = 22.dp))
+        else LazyColumn(contentPadding = PaddingValues(horizontal = 20.dp, vertical = 6.dp)) {
+            items(visits) { visit ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("${b.nameOf(visit.book)} ${visit.chapter}", color = ink.text, fontSize = 14.5.sp, fontFamily = Lora)
+                        Text(relativeDay(visit.at), color = ink.sub, fontSize = 11.5.sp, fontFamily = Lora)
+                    }
+                    Text(formatDuration(visit.millis), color = ink.text.copy(alpha = .7f), fontSize = 12.5.sp, fontFamily = Lora)
+                }
+                HairLine(ink.line.copy(alpha = .6f))
+            }
+        }
+    }
+}
+
+fun ColorTone(value: Long) = androidx.compose.ui.graphics.Color(value)

@@ -1,0 +1,496 @@
+package bf.nt.parolesvivantes
+
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RectF
+import android.graphics.Typeface
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextPaint
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+
+enum class Template(val label: String) { PHOTO("Photo"), CARD("Carte"), FRAME("Cadre"), PLAIN("Texte") }
+
+data class ImgStyle(
+    val template: Template = Template.PHOTO,
+    val ink: Int = 1,
+    val serif: Boolean = true,
+    val scale: Float = 1f,
+    val centered: Boolean = true,
+    val spacing: Float = 1.18f,
+    val margin: Float = 0.11f,
+    val refOnPhoto: Boolean = true,
+    val upper: Boolean = false
+)
+
+val inkColors = listOf(
+    Color(0xFF3B2A1E),
+    Color(0xFF8A5221),
+    Color(0xFF4C5B36),
+    Color(0xFFF5EADB)
+)
+
+private const val W = 1080f
+private const val H = 1350f
+
+fun renderVerseImage(ctx: Context, text: String, ref: String, photo: Bitmap?, style: ImgStyle, outW: Int = 1080, outH: Int = 1350): Bitmap {
+    val bmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bmp)
+    val s = outW / W
+    canvas.scale(s, s)
+
+    val inkColor = android.graphics.Color.rgb(
+        (inkColors[style.ink].red * 255).toInt(),
+        (inkColors[style.ink].green * 255).toInt(),
+        (inkColors[style.ink].blue * 255).toInt()
+    )
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    val cream = android.graphics.Color.rgb(246, 236, 224)
+    val creamPanel = android.graphics.Color.rgb(239, 225, 214)
+    val brown = android.graphics.Color.rgb(138, 82, 33)
+
+    val serif = Typeface.create("serif", Typeface.NORMAL)
+    val serifBold = Typeface.create("serif", Typeface.BOLD)
+    val sans = Typeface.create("sans-serif", Typeface.NORMAL)
+    val textFace = if (style.serif) serif else sans
+
+    fun drawPhoto(dst: RectF) {
+        if (photo != null) {
+            val ratio = photo.width.toFloat() / photo.height
+            val target = dst.width() / dst.height()
+            val src = if (ratio > target) {
+                val w = (photo.height * target).toInt()
+                val left = (photo.width - w) / 2
+                Rect(left, 0, left + w, photo.height)
+            } else {
+                val h = (photo.width / target).toInt()
+                val top = (photo.height - h) / 2
+                Rect(0, top, photo.width, top + h)
+            }
+            canvas.drawBitmap(photo, src, dst, paint)
+        } else {
+            paint.color = android.graphics.Color.rgb(70, 56, 44)
+            canvas.drawRect(dst, paint)
+        }
+    }
+
+    fun drawTag(cx: Float, cy: Float, h: Float = 62f, bg: Int = brown, fg: Int = cream) {
+        paint.color = bg
+        paint.typeface = serifBold
+        paint.textSize = 30f
+        val w = paint.measureText(ref) + 62f
+        val r = RectF(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+        canvas.drawRoundRect(r, 10f, 10f, paint)
+        paint.color = fg
+        paint.textAlign = Paint.Align.CENTER
+        val baseline = cy - (paint.descent() + paint.ascent()) / 2
+        canvas.drawText(ref, cx, baseline, paint)
+        paint.textAlign = Paint.Align.LEFT
+    }
+
+    fun drawText(text: String, top: Float, maxHeight: Float, width: Float, color: Int, startSize: Float, upper: Boolean) {
+        val body = if (upper) text.uppercase() else text
+        val tp = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = color
+            typeface = textFace
+            textSize = startSize * style.scale
+            letterSpacing = if (upper) 0.10f else 0.01f
+        }
+        val align = if (style.centered) Layout.Alignment.ALIGN_CENTER else Layout.Alignment.ALIGN_NORMAL
+        fun build(size: Float): StaticLayout {
+            tp.textSize = size
+            return StaticLayout.Builder.obtain(body, 0, body.length, tp, width.toInt())
+                .setAlignment(align)
+                .setLineSpacing(0f, style.spacing)
+                .setIncludePad(false)
+                .build()
+        }
+        var size = tp.textSize
+        var layout = build(size)
+        while (layout.height > maxHeight && size > 22f) {
+            size -= 2f
+            layout = build(size)
+        }
+        canvas.save()
+        val y = top + ((maxHeight - layout.height) / 2f).coerceAtLeast(0f)
+        canvas.translate((W - width) / 2f, y)
+        layout.draw(canvas)
+        canvas.restore()
+    }
+
+    fun attribution(color: Int, y: Float = H - 46f) {
+        paint.color = color
+        paint.typeface = sans
+        paint.textSize = 20f
+        paint.textAlign = Paint.Align.CENTER
+        canvas.drawText("Parole vivante · Alfred Kuen · BLF Éditions · 2013", W / 2, y, paint)
+        paint.textAlign = Paint.Align.LEFT
+    }
+
+    val body = text.trim().removeSuffix("»").removePrefix("«").trim()
+    val textWidth = W - 2 * (W * style.margin)
+
+    when (style.template) {
+        Template.PHOTO -> {
+            drawPhoto(RectF(0f, 0f, W, 780f))
+            paint.color = creamPanel
+            canvas.drawRect(0f, 780f, W, H, paint)
+            if (style.refOnPhoto) drawTag(W / 2, 780f)
+            val top = 780f + (if (style.refOnPhoto) 74f else 30f)
+            drawText(body, top, 1180f - top, textWidth, inkColor, 46f, style.upper)
+            if (!style.refOnPhoto) {
+                paint.color = brown; paint.typeface = serifBold; paint.textSize = 30f; paint.textAlign = Paint.Align.CENTER
+                canvas.drawText(ref, W / 2, 1200f, paint); paint.textAlign = Paint.Align.LEFT
+            }
+            attribution(brown)
+        }
+        Template.CARD -> {
+            drawPhoto(RectF(0f, 0f, W, H))
+            paint.color = android.graphics.Color.argb(110, 0, 0, 0)
+            canvas.drawRect(0f, 0f, W, H, paint)
+            paint.color = android.graphics.Color.argb(238, 243, 230, 214)
+            canvas.drawRoundRect(RectF(96f, 236f, W - 96f, 1024f), 14f, 14f, paint)
+            drawText(body, 300f, 590f, textWidth, inkColor, 42f, style.upper)
+            drawTag(W / 2, 958f)
+            attribution(cream)
+        }
+        Template.FRAME -> {
+            paint.color = android.graphics.Color.rgb(243, 232, 214)
+            canvas.drawRect(0f, 0f, W, H, paint)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 2f
+            paint.color = brown
+            canvas.drawRect(46f, 46f, W - 46f, H - 46f, paint)
+            paint.style = Paint.Style.FILL
+            val frame = RectF(86f, 110f, W - 86f, 700f)
+            paint.color = android.graphics.Color.WHITE
+            canvas.drawRect(frame.left - 14f, frame.top - 14f, frame.right + 14f, frame.bottom + 14f, paint)
+            drawPhoto(frame)
+            drawText(body, 760f, 340f, textWidth, inkColor, 40f, style.upper)
+            if (style.refOnPhoto) drawTag(W / 2, 1128f, 56f) else {
+                paint.color = brown; paint.typeface = serifBold; paint.textSize = 32f; paint.textAlign = Paint.Align.CENTER
+                canvas.drawText(ref, W / 2, 1138f, paint); paint.textAlign = Paint.Align.LEFT
+            }
+            attribution(brown, H - 92f)
+        }
+        Template.PLAIN -> {
+            paint.color = android.graphics.Color.rgb(246, 238, 226)
+            canvas.drawRect(0f, 0f, W, H, paint)
+            drawText(body, 190f, 720f, textWidth, inkColor, 52f, style.upper)
+            paint.color = brown
+            canvas.drawRect(W / 2 - 60f, 1000f, W / 2 + 60f, 1003f, paint)
+            drawTag(W / 2, 1092f, 56f)
+            attribution(brown)
+        }
+    }
+    return bmp
+}
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+fun ImageEditor(ctx: Context, b: Bible, verse: Verse, onClose: () -> Unit) {
+    var style by remember { mutableStateOf(ImgStyle()) }
+    var photo by remember { mutableStateOf<Bitmap?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf("") }
+    var showFonts by remember { mutableStateOf(false) }
+    var showLayout by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    val bundled = rememberFond(fondFor(verse.key), 1080)
+    var preview by remember { mutableStateOf<ImageBitmapHolder?>(null) }
+    LaunchedEffect(style, bundled, photo) {
+        preview = withContext(Dispatchers.Default) {
+            val bg = photo ?: bundled?.let { bmp ->
+                runCatching { bmp.asAndroidBitmap() }.getOrNull()
+            }
+            ImageBitmapHolder(renderVerseImage(ctx, verse.text, b.ref(verse), bg, style, 540, 675).asImageBitmap())
+        }
+    }
+
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) scope.launch {
+            busy = true
+            val decoded = withContext(Dispatchers.IO) { decodeUri(ctx, uri, 1350) }
+            if (decoded != null) photo = decoded else message = "Photo illisible."
+            busy = false
+        }
+    }
+    val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { uri ->
+        if (uri != null) scope.launch {
+            busy = true
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bg = photo ?: decodeAsset(ctx, fondFor(verse.key), 1350, true)
+                    val full = renderVerseImage(ctx, verse.text, b.ref(verse), bg, style, 1080, 1350)
+                    ctx.contentResolver.openOutputStream(uri)?.use { out -> full.compress(Bitmap.CompressFormat.PNG, 100, out) } ?: false
+                    if (full != bg) full.recycle()
+                    true
+                }.getOrDefault(false)
+            }
+            message = if (ok) "Image enregistrée." else "Enregistrement impossible."
+            busy = false
+        }
+    }
+
+    fun share() {
+        scope.launch {
+            busy = true
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bg = photo ?: decodeAsset(ctx, fondFor(verse.key), 1350, true)
+                    val full = renderVerseImage(ctx, verse.text, b.ref(verse), bg, style, 1080, 1350)
+                    val dir = File(ctx.cacheDir, "verse_images").apply { mkdirs() }
+                    val file = File(dir, "verset-${verse.key.replace('.', '-')}.png")
+                    file.outputStream().use { out -> full.compress(Bitmap.CompressFormat.PNG, 100, out) }
+                    full.recycle()
+                    val uri = FileProvider.getUriForFile(ctx, "bf.nt.parolesvivantes.fileprovider", file)
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "image/png"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        putExtra(Intent.EXTRA_TEXT, "${verse.text}\n\n${b.ref(verse)} — Parole vivante, Alfred Kuen, BLF Éditions, 2013.")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    ctx.startActivity(Intent.createChooser(intent, "Partager l’image"))
+                    true
+                }.getOrDefault(false)
+            }
+            if (!ok) message = "Partage impossible."
+            busy = false
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color(0xFF17120E)).systemBarsPadding()) {
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                Modifier.fillMaxWidth().height(58.dp).padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CircleIconButton(R.drawable.ic_close, "Fermer", onClose, Color(0xFFEDE2D4), 40.dp, iconSize = 20.dp)
+                Spacer(Modifier.width(6.dp))
+                Text(b.ref(verse), color = Color(0xFFEDE2D4), fontSize = 15.sp, fontFamily = Lora, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.weight(1f))
+                CircleIconButton(R.drawable.ic_download, "Enregistrer", { save.launch("verset-${verse.key.replace('.', '-')}.png") }, Color(0xFFEDE2D4), 40.dp, iconSize = 20.dp)
+                Spacer(Modifier.width(4.dp))
+                Box(
+                    Modifier.size(44.dp).clip(CircleShape).background(Color(0xFFFEB87A)).clickable { if (!busy) share() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(painterResource(R.drawable.ic_share), "Partager", Modifier.size(20.dp), tint = Color(0xFF3A2008))
+                }
+            }
+            Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 18.dp), contentAlignment = Alignment.Center) {
+                val holder = preview
+                if (holder == null) CircularProgress()
+                else Image(
+                    holder.bitmap,
+                    contentDescription = "Aperçu de l’image",
+                    modifier = Modifier.fillMaxWidth().aspectRatio(0.8f).clip(RoundedCornerShape(6.dp)),
+                    contentScale = ContentScale.Fit
+                )
+                if (busy) Box(Modifier.fillMaxSize().background(Color(0x66000000)), contentAlignment = Alignment.Center) { CircularProgress() }
+            }
+            if (message.isNotEmpty()) {
+                Text(message, color = Color(0xFFE9C9A8), fontSize = 12.sp, fontFamily = Lora, modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
+            }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CircleIconButton(R.drawable.ic_photo, "Choisir une photo", { pick.launch("image/*") }, Color(0xFFEDE2D4), 38.dp, iconSize = 19.dp)
+                Box(
+                    Modifier.size(38.dp).clip(CircleShape).background(Color(0xFF3A2C22)).clickable { },
+                    contentAlignment = Alignment.Center
+                ) { Icon(painterResource(R.drawable.ic_templates), null, Modifier.size(19.dp), tint = Color(0xFFFEB87A)) }
+                Box(
+                    Modifier.size(38.dp).clip(CircleShape).clickable { showFonts = true },
+                    contentAlignment = Alignment.Center
+                ) { Text("Aa", color = Color(0xFFEDE2D4), fontSize = 14.sp, fontFamily = Lora, fontWeight = FontWeight.SemiBold) }
+                CircleIconButton(R.drawable.ic_tune, "Disposition", { showLayout = true }, Color(0xFFEDE2D4), 38.dp, iconSize = 19.dp)
+                Spacer(Modifier.weight(1f))
+                inkColors.forEachIndexed { i, color ->
+                    Box(
+                        Modifier
+                            .padding(start = 6.dp)
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(color)
+                            .clickable { style = style.copy(ink = i) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (style.ink == i) Icon(
+                            painterResource(R.drawable.ic_check),
+                            null,
+                            Modifier.size(15.dp),
+                            tint = if (i == 3) Color(0xFF6B4A2E) else Color(0xFFF7EFE4)
+                        )
+                    }
+                }
+            }
+            LazyRow(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(Template.entries, key = { it.name }) { template ->
+                    val selected = style.template == template
+                    Column(
+                        Modifier
+                            .width(74.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF241B14))
+                            .clickable { style = style.copy(template = template) }
+                            .padding(4.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        TemplateThumb(template, verse, b, if (selected) Color(0xFFFEB87A) else Color(0x33FFFFFF))
+                        Spacer(Modifier.height(4.dp))
+                        Text(template.label, color = if (selected) Color(0xFFFEB87A) else Color(0xFFCFC0AE), fontSize = 9.5.sp, fontFamily = Lora)
+                    }
+                }
+            }
+        }
+    }
+
+    if (showFonts) {
+        androidx.compose.material3.ModalBottomSheet(
+            onDismissRequest = { showFonts = false },
+            containerColor = Color(0xFF221A13),
+            contentColor = Color(0xFFEDE2D4)
+        ) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 8.dp)) {
+                Text("Police et taille", fontSize = 18.sp, fontFamily = Lora, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(14.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(true to "Serif", false to "Sans serif").forEach { (s, label) ->
+                        InkChip(label, style.serif == s) { style = style.copy(serif = s) }
+                    }
+                    InkChip("Majuscules", style.upper) { style = style.copy(upper = !style.upper) }
+                }
+                Spacer(Modifier.height(16.dp))
+                Text("Taille du texte", fontSize = 13.sp, fontFamily = Lora)
+                Slider(
+                    value = style.scale,
+                    onValueChange = { style = style.copy(scale = it) },
+                    valueRange = 0.75f..1.35f
+                )
+                Spacer(Modifier.height(18.dp))
+            }
+        }
+    }
+    if (showLayout) {
+        androidx.compose.material3.ModalBottomSheet(
+            onDismissRequest = { showLayout = false },
+            containerColor = Color(0xFF221A13),
+            contentColor = Color(0xFFEDE2D4)
+        ) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 8.dp)) {
+                Text("Disposition", fontSize = 18.sp, fontFamily = Lora, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(14.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    InkChip("Centré", style.centered) { style = style.copy(centered = true) }
+                    InkChip("À gauche", !style.centered) { style = style.copy(centered = false) }
+                }
+                Spacer(Modifier.height(16.dp))
+                Text("Interligne", fontSize = 13.sp, fontFamily = Lora)
+                Slider(value = style.spacing, onValueChange = { style = style.copy(spacing = it) }, valueRange = 1.0f..1.6f)
+                Text("Marges", fontSize = 13.sp, fontFamily = Lora)
+                Slider(value = style.margin, onValueChange = { style = style.copy(margin = it) }, valueRange = 0.06f..0.17f)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Référence sur la photo", Modifier.weight(1f), fontSize = 13.sp, fontFamily = Lora)
+                    Switch(checked = style.refOnPhoto, onCheckedChange = { style = style.copy(refOnPhoto = it) })
+                }
+                Spacer(Modifier.height(18.dp))
+            }
+        }
+    }
+    LaunchedEffect(message) { if (message.isNotEmpty()) { kotlinx.coroutines.delay(2600); message = "" } }
+}
+
+data class ImageBitmapHolder(val bitmap: androidx.compose.ui.graphics.ImageBitmap)
+
+@Composable
+private fun InkChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Text(
+        label,
+        color = if (selected) Color(0xFF2A1B0D) else Color(0xFFDCCBB8),
+        fontSize = 12.sp,
+        fontFamily = Lora,
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) Color(0xFFFEB87A) else Color(0xFF3A2C22))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 13.dp, vertical = 8.dp)
+    )
+}
+
+@Composable
+private fun TemplateThumb(template: Template, verse: Verse, b: Bible, border: Color) {
+    val ctx = LocalContext.current
+    val bg = rememberFond(fondFor(verse.key), 320)
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .aspectRatio(0.8f)
+            .clip(RoundedCornerShape(5.dp))
+            .background(border)
+            .padding(1.5.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(Color(0xFFEFE1D6))
+    ) {
+        val painter = bg?.let { androidx.compose.ui.graphics.painter.BitmapPainter(it) }
+        when (template) {
+            Template.PHOTO -> {
+                if (painter != null) Image(painter, null, Modifier.fillMaxWidth().fillMaxHeight(0.56f), contentScale = ContentScale.Crop)
+                Box(Modifier.fillMaxWidth().fillMaxHeight(0.44f).align(Alignment.BottomCenter).background(Color(0xFFEFE1D6)))
+            }
+            Template.CARD -> {
+                if (painter != null) Image(painter, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                Box(Modifier.fillMaxSize().background(Color(0x59261C14)))
+                Box(Modifier.fillMaxWidth(0.78f).fillMaxHeight(0.6f).align(Alignment.Center).background(Color(0xDDF3E6D6)))
+            }
+            Template.FRAME -> {
+                Box(Modifier.fillMaxWidth().fillMaxHeight(0.62f).padding(3.dp).background(Color.White)) {
+                    if (painter != null) Image(painter, null, Modifier.fillMaxSize().padding(1.5.dp), contentScale = ContentScale.Crop)
+                }
+            }
+            Template.PLAIN -> {
+                Box(Modifier.fillMaxWidth(0.5f).height(1.5.dp).align(Alignment.Center).background(Color(0xFF8A5221)))
+            }
+        }
+    }
+}

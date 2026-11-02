@@ -1,0 +1,64 @@
+package bf.nt.parolesvivantes
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+val fonds = listOf("ciel_or", "ciel_nuit", "foret", "papier")
+
+fun fondFor(key: String): String {
+    if (fonds.isEmpty()) return "papier"
+    return fonds[(key.hashCode() and 0x7fffffff) % fonds.size]
+}
+
+/** Décodage réduit : jamais plus de 1080 px de large, RGB_565 par défaut, pour la mémoire. */
+fun decodeAsset(ctx: Context, name: String, maxWidth: Int = 1080, highQuality: Boolean = false): Bitmap? = try {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    ctx.assets.open("fonds/$name.jpg").use { BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth <= 0) null else {
+        var sample = 1
+        while (bounds.outWidth / sample > maxWidth) sample *= 2
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = if (highQuality) Bitmap.Config.ARGB_8888 else Bitmap.Config.RGB_565
+        }
+        ctx.assets.open("fonds/$name.jpg").use { BitmapFactory.decodeStream(it, null, opts) }
+    }
+} catch (e: Exception) {
+    null
+}
+
+@Composable
+fun rememberFond(name: String, maxWidth: Int = 1080): ImageBitmap? {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    var bmp by remember(name, maxWidth) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(name, maxWidth) {
+        bmp = withContext(Dispatchers.IO) { decodeAsset(ctx, name, maxWidth)?.asImageBitmap() }
+    }
+    return bmp
+}
+
+/** Décodage d'une photo choisie par l'utilisateur, réduite avant tout traitement. */
+fun decodeUri(ctx: Context, uri: android.net.Uri, max: Int = 1350): Bitmap? = try {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth <= 0) null else {
+        var sample = 1
+        while (bounds.outWidth / sample > max || bounds.outHeight / sample > max) sample *= 2
+        ctx.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
+        }
+    }
+} catch (e: Exception) {
+    null
+}

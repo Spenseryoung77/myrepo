@@ -1,0 +1,228 @@
+package bf.nt.parolesvivantes
+
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.border
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.layout.IntrinsicSize
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+fun MarksScreen(
+    b: Bible,
+    marks: Set<String>,
+    revision: Int,
+    onBack: () -> Unit,
+    onOpen: (Verse) -> Unit,
+    onActions: (Verse) -> Unit,
+    onChanged: () -> Unit
+) {
+    val ink = LocalInk.current
+    val ctx = LocalContext.current
+    val prefs = remember { ctx.ntPrefs() }
+    var entries by remember { mutableStateOf<List<Verse>>(emptyList()) }
+    var bookFilter by remember { mutableStateOf<String?>(null) }
+    var colorFilter by remember { mutableIntStateOf(-1) }
+    var onlyNotes by remember { mutableStateOf(false) }
+    var bookMenu by remember { mutableStateOf(false) }
+    var colorMenu by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
+
+    LaunchedEffect(marks, revision) {
+        entries = withContext(Dispatchers.IO) {
+            val keys = marks + prefs.all.keys.filter {
+                it.startsWith("note.") && prefs.getString(it, "").orEmpty().isNotBlank()
+            }.map { it.removePrefix("note.") }
+            keys.distinct().mapNotNull { b.verse(it) }
+        }
+    }
+
+    val shown = entries.filter { v ->
+        (bookFilter == null || v.book == bookFilter) &&
+            (colorFilter == -1 || (v.key in marks && prefs.getInt("color.${v.key}", 1) == colorFilter)) &&
+            (!onlyNotes || prefs.getString("note.${v.key}", "").orEmpty().isNotBlank())
+    }
+
+    Column(Modifier.fillMaxSize().background(ink.bg)) {
+        Box(Modifier.fillMaxWidth().statusBarsPadding().height(54.dp)) {
+            CircleIconButton(R.drawable.ic_arrow_back, "Retour", onBack, ink.text, 42.dp, modifier = Modifier.align(Alignment.CenterStart).padding(start = 4.dp), iconSize = 21.dp)
+            Text("Signets", Modifier.align(Alignment.Center), fontSize = 17.sp, fontFamily = Lora, fontWeight = FontWeight.SemiBold, color = ink.text)
+            CircleIconButton(R.drawable.ic_trash, "Tout supprimer", { if (entries.isNotEmpty()) confirmClear = true }, ink.text, 40.dp, modifier = Modifier.align(Alignment.CenterEnd).padding(end = 6.dp), iconSize = 19.dp)
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Box {
+                MenuChip(
+                    label = bookFilter?.let { b.nameOf(it) } ?: "Livres",
+                    active = bookFilter != null,
+                    onClick = { bookMenu = true }
+                )
+                DropdownMenu(expanded = bookMenu, onDismissRequest = { bookMenu = false }) {
+                    DropdownMenuItem(text = { Text("Tous les livres", fontFamily = Lora) }, onClick = { bookFilter = null; bookMenu = false })
+                    b.books.filter { bk -> entries.any { it.book == bk.id } }.forEach { bk ->
+                        DropdownMenuItem(
+                            text = { Text(bk.name, fontFamily = Lora) },
+                            onClick = { bookFilter = bk.id; bookMenu = false }
+                        )
+                    }
+                }
+            }
+            Box {
+                MenuChip(
+                    label = if (colorFilter == -1) "Couleurs" else listOf("Menthe", "Or", "Bleu", "Rose", "Mauve", "Sable")[colorFilter],
+                    active = colorFilter != -1,
+                    onClick = { colorMenu = true }
+                )
+                DropdownMenu(expanded = colorMenu, onDismissRequest = { colorMenu = false }) {
+                    DropdownMenuItem(text = { Text("Toutes les couleurs", fontFamily = Lora) }, onClick = { colorFilter = -1; colorMenu = false })
+                    listOf("Menthe", "Or", "Bleu", "Rose", "Mauve", "Sable").forEachIndexed { index, name ->
+                        DropdownMenuItem(
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(Modifier.size(14.dp).clip(RoundedCornerShape(4.dp)).background((if (ink.dark) bookmarksDark else bookmarksLight)[index]))
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(name, fontFamily = Lora)
+                                }
+                            },
+                            onClick = { colorFilter = index; colorMenu = false }
+                        )
+                    }
+                }
+            }
+            MenuChip(
+                label = "Avec Notes",
+                active = onlyNotes,
+                onClick = { onlyNotes = !onlyNotes },
+                square = true,
+                squareChecked = onlyNotes
+            )
+        }
+        if (shown.isEmpty()) {
+            EmptyState(
+                if (entries.isEmpty()) "Touchez un verset pendant la lecture pour ajouter un signet ou une note."
+                else "Aucun signet ne correspond à ces filtres.",
+                Modifier.padding(horizontal = 22.dp).padding(top = 20.dp)
+            )
+        } else {
+            LazyColumn(
+                Modifier.weight(1f),
+                contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 26.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(shown, key = { it.key }) { v ->
+                    val index = prefs.getInt("color.${v.key}", 1).coerceIn(0, 5)
+                    val cardColor = (if (ink.dark) bookmarksDark else bookmarksLight)[index]
+                    val note = prefs.getString("note.${v.key}", "").orEmpty()
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(IntrinsicSize.Min)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(cardColor)
+                            .combinedClickable(onClick = { onOpen(v) }, onLongClick = { onActions(v) })
+                    ) {
+                        Box(Modifier.width(4.dp).fillMaxHeight().background(bookmarkAccents[index]))
+                        Column(Modifier.padding(horizontal = 14.dp, vertical = 13.dp)) {
+                            Text(
+                                "[${b.ref(v)}]  ${v.text}",
+                                color = ink.text,
+                                fontSize = 15.sp,
+                                lineHeight = 24.sp,
+                                fontFamily = Lora
+                            )
+                            if (note.isNotBlank()) {
+                                Spacer(Modifier.height(6.dp))
+                                Row(verticalAlignment = Alignment.Top) {
+                                    Icon(painterResource(R.drawable.ic_pencil), null, Modifier.size(13.dp), tint = ink.text.copy(alpha = .6f))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(note, color = ink.text.copy(alpha = .72f), fontSize = 12.5.sp, lineHeight = 18.sp, fontFamily = Lora)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            containerColor = ink.bg,
+            titleContentColor = ink.text,
+            textContentColor = ink.text,
+            title = { Text("Supprimer tous les signets ?", fontFamily = Lora, fontSize = 18.sp, fontWeight = FontWeight.SemiBold) },
+            text = { Text("Les couleurs et les notes personnelles seront également effacées. Cette action est définitive.", fontFamily = Lora, fontSize = 14.sp) },
+            confirmButton = {
+                TextButton(onClick = {
+                    val editor = prefs.edit()
+                    editor.remove("favorites")
+                    prefs.all.keys.filter { it.startsWith("color.") || it.startsWith("note.") || it.startsWith("markAt.") }.forEach { editor.remove(it) }
+                    editor.apply()
+                    confirmClear = false
+                    onChanged()
+                }) { Text("Tout supprimer", fontFamily = Lora) }
+            },
+            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Annuler", fontFamily = Lora) } }
+        )
+    }
+}
+
+@Composable
+private fun MenuChip(
+    label: String,
+    active: Boolean,
+    onClick: () -> Unit,
+    square: Boolean = false,
+    squareChecked: Boolean = false
+) {
+    val ink = LocalInk.current
+    Row(
+        Modifier
+            .height(38.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (active) ink.accentSoft else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (square) {
+            Box(
+                Modifier
+                    .size(15.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(if (squareChecked) ink.text else Color.Transparent)
+                    .then(if (!squareChecked) Modifier.border(1.3.dp, ink.faint, RoundedCornerShape(3.dp)) else Modifier),
+                contentAlignment = Alignment.Center
+            ) {
+                if (squareChecked) Icon(painterResource(R.drawable.ic_check), null, Modifier.size(11.dp), tint = ink.bg)
+            }
+            Spacer(Modifier.width(7.dp))
+        }
+        Text(label, color = ink.text, fontSize = 13.sp, fontFamily = Lora, maxLines = 1)
+        if (!square) {
+            Spacer(Modifier.width(5.dp))
+            Icon(painterResource(R.drawable.ic_down), null, Modifier.size(13.dp), tint = ink.sub)
+        }
+    }
+}

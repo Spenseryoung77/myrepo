@@ -1,0 +1,171 @@
+package bf.nt.parolesvivantes
+
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+
+val badgePalette = listOf(
+    Color(0xFFDCE7C9), Color(0xFFF3DCC2), Color(0xFFD9E4EE), Color(0xFFEBDBD4),
+    Color(0xFFE6DDEC), Color(0xFFD8E8DF)
+)
+
+@Composable
+fun localContext(): android.content.Context = androidx.compose.ui.platform.LocalContext.current
+
+fun bookBadgeColor(index: Int) = badgePalette[((index % badgePalette.size) + badgePalette.size) % badgePalette.size]
+
+@Composable
+fun CircleIconButton(
+    icon: Int,
+    description: String,
+    onClick: () -> Unit,
+    tint: Color,
+    size: Dp = 40.dp,
+    background: Color = Color.Transparent,
+    iconSize: Dp = 21.dp,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(background)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(painterResource(icon), description, modifier = Modifier.size(iconSize), tint = tint)
+    }
+}
+
+@Composable
+fun PillChip(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    leading: (@Composable () -> Unit)? = null
+) {
+    val ink = LocalInk.current
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) Color(0xFF7A5A45) else ink.pill.copy(alpha = if (ink.dark) 0.85f else 0.65f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 15.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (leading != null) {
+            leading()
+            Spacer(Modifier.width(6.dp))
+        }
+        Text(
+            text,
+            color = if (selected) Color(0xFFFDF3E8) else ink.text,
+            fontSize = 13.sp,
+            fontFamily = Lora,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/** Bouton « Voir tout » en pilule fine des maquettes. */
+@Composable
+fun SeeAllButton(text: String = "Voir tout", onClick: () -> Unit) {
+    val ink = LocalInk.current
+    Text(
+        text,
+        color = ink.text,
+        fontSize = 12.5.sp,
+        fontFamily = Lora,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .border(1.dp, ink.faint.copy(alpha = 0.7f), RoundedCornerShape(50))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+    )
+}
+
+@Composable
+fun SectionHeader(title: String, seeAll: (() -> Unit)? = null) {
+    val ink = LocalInk.current
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(title, color = ink.text, fontSize = 16.sp, fontFamily = Lora, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.weight(1f))
+        if (seeAll != null) SeeAllButton(onClick = seeAll)
+    }
+}
+
+@Composable
+fun BookBadge(code: String, index: Int, size: Dp = 34.dp) {
+    Box(
+        Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(bookBadgeColor(index)),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            code.uppercase(),
+            color = Color(0xFF33402B),
+            fontSize = (size.value * 0.28f).sp,
+            fontFamily = Lora,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+/** Petit ruban de signet dessiné, plus net qu'une icône bitmap. */
+@Composable
+fun BookmarkRibbon(color: Color, width: Dp = 14.dp, height: Dp = 19.dp) {
+    Canvas(Modifier.size(width, height)) {
+        val p = Path().apply {
+            moveTo(0f, 0f)
+            lineTo(size.width, 0f)
+            lineTo(size.width, size.height)
+            lineTo(size.width / 2f, size.height * 0.72f)
+            lineTo(0f, size.height)
+            close()
+        }
+        drawPath(p, color)
+    }
+}
+
+@Composable
+fun HairLine(color: Color = LocalInk.current.line, modifier: Modifier = Modifier) {
+    Box(modifier.fillMaxWidth().height(1.dp).background(color))
+}
+
+@Composable
+fun EmptyState(text: String, modifier: Modifier = Modifier) {
+    val ink = LocalInk.current
+    Text(
+        text,
+        color = ink.sub,
+        fontSize = 14.sp,
+        fontFamily = Lora,
+        modifier = modifier.padding(vertical = 32.dp, horizontal = 8.dp)
+    )
+}

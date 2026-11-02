@@ -1,0 +1,431 @@
+package bf.nt.parolesvivantes
+
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import androidx.work.CoroutineWorker
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.time.ZonedDateTime
+import java.util.concurrent.TimeUnit
+
+class MainActivity : ComponentActivity() {
+    private val tick = mutableIntStateOf(0)
+    private val incoming = mutableStateOf<String?>(null)
+
+    private val permission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        ntPrefs().edit().putBoolean("notifications", granted).apply()
+        if (granted) scheduleDaily(this) else WorkManager.getInstance(this).cancelUniqueWork("daily-verse")
+        tick.intValue++
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
+        incoming.value = intent.getStringExtra("verse")
+        setContent {
+            val dark = ntPrefs().getBoolean("dark", false)
+            LaunchedEffect(dark) {
+                enableEdgeToEdge(
+                    statusBarStyle = if (dark) SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                    else SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
+                    navigationBarStyle = if (dark) SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                    else SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+                )
+            }
+            ParolesApp(
+                tick = tick.intValue,
+                incoming = incoming.value,
+                onConsumeIncoming = { incoming.value = null },
+                requestNotifications = {
+                    if (Build.VERSION.SDK_INT >= 33 &&
+                        ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                    ) permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    else {
+                        ntPrefs().edit().putBoolean("notifications", true).apply()
+                        scheduleDaily(this)
+                        tick.intValue++
+                    }
+                }
+            )
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        tick.intValue++
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        incoming.value = intent.getStringExtra("verse")
+    }
+}
+
+@Composable
+fun ParolesApp(tick: Int, incoming: String?, onConsumeIncoming: () -> Unit, requestNotifications: () -> Unit) {
+    val ctx = LocalContext.current
+    val prefs = remember { ctx.ntPrefs() }
+    var b by remember { mutableStateOf<Bible?>(null) }
+    var failed by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        try {
+            b = withContext(Dispatchers.IO) { Bible.get(ctx) }
+        } catch (e: Exception) {
+            failed = true
+        }
+    }
+
+    var dark by remember { mutableStateOf(prefs.getBoolean("dark", false)) }
+    var fontSize by remember { mutableIntStateOf(prefs.getInt("size", 22)) }
+    var lineFactor by remember { mutableFloatStateOf(prefs.getFloat("line", 1.72f)) }
+    var notifications by remember { mutableStateOf(prefs.getBoolean("notifications", false)) }
+    LaunchedEffect(tick) { notifications = prefs.getBoolean("notifications", false) }
+
+    var screen by remember { mutableStateOf("home") }
+    var bookId by remember { mutableStateOf(prefs.getString("book", "JHN") ?: "JHN") }
+    var chapter by remember { mutableIntStateOf(prefs.getInt("chapter", 1)) }
+    var focus by remember { mutableStateOf<String?>(null) }
+    var marks by remember { mutableStateOf(prefs.getStringSet("favorites", emptySet())!!.toSet()) }
+    var markVerses by remember { mutableStateOf<List<Verse>>(emptyList()) }
+    var revision by remember { mutableIntStateOf(0) }
+
+    var day by remember { mutableStateOf<Verse?>(null) }
+    var random by remember { mutableStateOf<List<Verse>>(emptyList()) }
+    var actionsVerse by remember { mutableStateOf<Verse?>(null) }
+    var noteVerse by remember { mutableStateOf<Verse?>(null) }
+    var editorVerse by remember { mutableStateOf<Verse?>(null) }
+    var menu by remember { mutableStateOf(false) }
+    var bookPicker by remember { mutableStateOf(false) }
+    var chapterPicker by remember { mutableStateOf(false) }
+    var textSheet by remember { mutableStateOf(false) }
+    var about by remember { mutableStateOf(false) }
+
+    val snackbar = remember { androidx.compose.material3.SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    fun refresh() { revision++ }
+
+    fun open(v: Verse) {
+        bookId = v.book
+        chapter = v.chapter
+        focus = v.key
+        screen = "read"
+    }
+
+    fun saveMarks(next: Set<String>) {
+        marks = next
+        prefs.edit().putStringSet("favorites", next).apply()
+        refresh()
+    }
+
+    LaunchedEffect(b, tick) {
+        val db = b ?: return@LaunchedEffect
+        day = withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            val last = prefs.getLong("featured_time", 0)
+            val old = prefs.getString("featured", "") ?: ""
+            if (shouldRefreshVerse(now, last, old.isNotEmpty())) {
+                val v = db.random(old)
+                prefs.edit().putString("featured", v.key).putLong("featured_time", now).apply()
+                v
+            } else db.verse(old)
+        }
+        if (random.isEmpty()) random = withContext(Dispatchers.IO) {
+            db.randomList(6, setOfNotNull(day?.key))
+        }
+    }
+
+    LaunchedEffect(b, marks, revision) {
+        val db = b ?: return@LaunchedEffect
+        markVerses = withContext(Dispatchers.IO) {
+            marks.sortedByDescending { prefs.getLong("markAt.$it", 0L) }.take(4).mapNotNull { db.verse(it) }
+        }
+    }
+
+    LaunchedEffect(b, incoming) {
+        val db = b ?: return@LaunchedEffect
+        val key = incoming ?: return@LaunchedEffect
+        withContext(Dispatchers.IO) { db.verse(key) }?.let { open(it) }
+        onConsumeIncoming()
+    }
+
+    BackHandler(enabled = editorVerse != null) { editorVerse = null }
+    BackHandler(enabled = editorVerse == null && actionsVerse != null) { actionsVerse = null }
+    BackHandler(enabled = editorVerse == null && actionsVerse == null && noteVerse != null) { noteVerse = null }
+    BackHandler(enabled = editorVerse == null && actionsVerse == null && screen != "home") {
+        screen = when (screen) {
+            "read" -> "home"
+            "progress", "history" -> "journal"
+            else -> "read"
+        }
+    }
+
+    AppTheme(dark) {
+        val ink = LocalInk.current
+        val db = b
+        Box(Modifier.fillMaxSize().background(ink.bg)) {
+            if (db == null) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    if (failed) Text("Chargement impossible. Rouvrez l’application.", color = ink.text)
+                    else CircularProgress()
+                }
+            } else {
+                when (screen) {
+                    "home" -> HomeScreen(
+                        lastBook = db.nameOf(bookId),
+                        lastChapter = chapter,
+                        day = day,
+                        random = random,
+                        marks = markVerses,
+                        onMenu = { menu = true },
+                        onContinue = { screen = "read" },
+                        onSearch = { screen = "search" },
+                        onMarks = { screen = "marks" },
+                        onOpen = { open(it) },
+                        onActions = { actionsVerse = it },
+                        onRefresh = {
+                            scope.launch {
+                                random = withContext(Dispatchers.IO) { db.randomList(6, setOfNotNull(day?.key)) }
+                            }
+                        },
+                        onSeeMarks = { screen = "marks" }
+                    )
+                    "read" -> ReaderScreen(
+                        b = db,
+                        bookId = bookId,
+                        chapter = chapter,
+                        fontSize = fontSize,
+                        lineFactor = lineFactor,
+                        focus = focus,
+                        marks = marks,
+                        revision = revision,
+                        onMenu = { menu = true },
+                        onSearch = { screen = "search" },
+                        onTextSettings = { textSheet = true },
+                        onMore = { menu = true },
+                        onChooseBook = { bookPicker = true },
+                        onChooseChapter = { chapterPicker = true },
+                        onVerse = { actionsVerse = it },
+                        onNavigate = { id, ch -> bookId = id; chapter = ch; focus = null }
+                    )
+                    "search" -> SearchScreen(db, onBack = { screen = "read" }, onOpen = { open(it) })
+                    "marks" -> MarksScreen(
+                        b = db,
+                        marks = marks,
+                        revision = revision,
+                        onBack = { screen = "read" },
+                        onOpen = { open(it) },
+                        onActions = { actionsVerse = it },
+                        onChanged = { marks = prefs.getStringSet("favorites", emptySet())!!.toSet(); refresh() }
+                    )
+                    "journal" -> JournalScreen(
+                        b = db,
+                        revision = revision,
+                        onBack = { screen = "read" },
+                        onSeeProgress = { screen = "progress" },
+                        onSeeHistory = { screen = "history" },
+                        onSeeMarks = { screen = "marks" },
+                        onMenu = { menu = true }
+                    )
+                    "progress" -> ProgressScreen(db, revision, onBack = { screen = "journal" })
+                    "history" -> HistoryScreen(db, revision, onBack = { screen = "journal" })
+                    "settings" -> SettingsScreen(
+                        size = fontSize,
+                        lineFactor = lineFactor,
+                        dark = dark,
+                        notifications = notifications,
+                        onSize = { fontSize = it; prefs.edit().putInt("size", it).apply() },
+                        onLine = { lineFactor = it; prefs.edit().putFloat("line", it).apply() },
+                        onDark = { dark = it; prefs.edit().putBoolean("dark", it).apply() },
+                        onNotifications = { enabled ->
+                            notifications = enabled
+                            if (enabled) requestNotifications() else {
+                                prefs.edit().putBoolean("notifications", false).apply()
+                                WorkManager.getInstance(ctx).cancelUniqueWork("daily-verse")
+                                revision++
+                            }
+                        },
+                        onBack = { screen = "read" },
+                        onAbout = { about = true },
+                        onClearMarks = {
+                            val editor = prefs.edit()
+                            editor.remove("favorites")
+                            prefs.all.keys.filter { it.startsWith("color.") || it.startsWith("note.") || it.startsWith("markAt.") }.forEach { editor.remove(it) }
+                            editor.apply()
+                            marks = emptySet()
+                            refresh()
+                        },
+                        onClearHistory = {
+                            val editor = prefs.edit()
+                            prefs.all.keys.filter { it.startsWith("read.") || it.startsWith("visit.") || it.startsWith("time.") }.forEach { editor.remove(it) }
+                            editor.apply()
+                            refresh()
+                        },
+                        onMenu = { menu = true }
+                    )
+                }
+            }
+
+            androidx.compose.material3.SnackbarHost(
+                snackbar,
+                Modifier.align(Alignment.BottomCenter)
+            )
+        }
+
+        if (menu) {
+            MenuSheet(
+                onNavigate = { id -> menu = false; if (b != null) screen = id },
+                onAbout = { menu = false; about = true },
+                onClose = { menu = false }
+            )
+        }
+        val dbv = b
+        if (dbv != null) {
+            if (bookPicker) {
+                BookPickerSheet(dbv, onPick = { book -> bookId = book.id; chapter = 1; focus = null; bookPicker = false; chapterPicker = true }, onClose = { bookPicker = false })
+            }
+            if (chapterPicker) {
+                val book = dbv.books.firstOrNull { it.id == bookId } ?: dbv.books.first()
+                ChapterPickerSheet(dbv, book, onPick = { c -> chapter = c; focus = null; chapterPicker = false }, onClose = { chapterPicker = false })
+            }
+            if (textSheet) {
+                TextSettingsSheet(fontSize, lineFactor, dark,
+                    onSize = { fontSize = it; prefs.edit().putInt("size", it).apply() },
+                    onLine = { lineFactor = it; prefs.edit().putFloat("line", it).apply() },
+                    onDark = { dark = it; prefs.edit().putBoolean("dark", it).apply() },
+                    onClose = { textSheet = false })
+            }
+            actionsVerse?.let { v ->
+                VerseActionsSheet(
+                    b = dbv,
+                    verse = v,
+                    marked = v.key in marks,
+                    markColor = prefs.getInt("color.${v.key}", 1).coerceIn(0, 5),
+                    hasNote = prefs.getString("note.${v.key}", "").orEmpty().isNotBlank(),
+                    onColor = { i ->
+                        prefs.edit().putInt("color.${v.key}", i).putLong("markAt.${v.key}", System.currentTimeMillis()).apply()
+                        if (v.key !in marks) saveMarks(marks + v.key)
+                        actionsVerse = null
+                    },
+                    onRemoveMark = {
+                        prefs.edit().remove("color.${v.key}").remove("note.${v.key}").apply()
+                        saveMarks(marks - v.key)
+                        actionsVerse = null
+                    },
+                    onNote = { noteVerse = v; actionsVerse = null },
+                    onImage = { editorVerse = v; actionsVerse = null },
+                    onCopy = {
+                        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("Verset", "${v.text}\n${dbv.ref(v)}"))
+                        actionsVerse = null
+                        scope.launch { snackbar.showSnackbar("Verset copié") }
+                    },
+                    onShare = {
+                        ctx.startActivity(
+                            Intent.createChooser(
+                                Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, "${v.text}\n\n${dbv.ref(v)} — Parole vivante, Alfred Kuen, BLF Éditions, 2013.")
+                                }, "Partager le verset"
+                            )
+                        )
+                        actionsVerse = null
+                    },
+                    onOpen = { open(v); actionsVerse = null },
+                    onClose = { actionsVerse = null }
+                )
+            }
+            noteVerse?.let { v ->
+                NoteDialog(dbv, v, prefs.getString("note.${v.key}", "").orEmpty(),
+                    onSave = { text ->
+                        if (text.isBlank()) prefs.edit().remove("note.${v.key}").apply()
+                        else prefs.edit().putString("note.${v.key}", text).apply()
+                        if (text.isNotBlank() && v.key !in marks) {
+                            prefs.edit().putLong("markAt.${v.key}", System.currentTimeMillis()).apply()
+                            saveMarks(marks + v.key)
+                        }
+                        noteVerse = null
+                        refresh()
+                    },
+                    onDismiss = { noteVerse = null })
+            }
+            editorVerse?.let { v ->
+                ImageEditor(ctx, dbv, v) { editorVerse = null }
+            }
+        }
+        if (about) AboutDialog { about = false }
+    }
+}
+
+class VerseWorker(c: Context, p: WorkerParameters) : CoroutineWorker(c, p) {
+    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        val app = applicationContext
+        if (!app.ntPrefs().getBoolean("notifications", false)) return@withContext Result.success()
+        try {
+            val bible = Bible.get(app)
+            val v = bible.random()
+            val manager = app.getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(NotificationChannel("verses", "Verset quotidien", NotificationManager.IMPORTANCE_DEFAULT))
+            if (Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(app, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            ) return@withContext Result.success()
+            val intent = Intent(app, MainActivity::class.java).apply {
+                putExtra("verse", v.key)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val pending = PendingIntent.getActivity(app, 1, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            val notification = NotificationCompat.Builder(app, "verses")
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(bible.ref(v))
+                .setContentText(v.text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(v.text))
+                .setContentIntent(pending)
+                .setAutoCancel(true)
+                .build()
+            manager.notify(1001, notification)
+            scheduleDaily(app)
+            Result.success()
+        } catch (e: Exception) {
+            Result.retry()
+        }
+    }
+}
+
+fun scheduleDaily(c: Context) {
+    val request = OneTimeWorkRequestBuilder<VerseWorker>()
+        .setInitialDelay(dailyDelay(ZonedDateTime.now()), TimeUnit.MILLISECONDS)
+        .build()
+    WorkManager.getInstance(c).enqueueUniqueWork("daily-verse", ExistingWorkPolicy.REPLACE, request)
+}

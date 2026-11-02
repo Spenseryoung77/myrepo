@@ -1,0 +1,295 @@
+package bf.nt.parolesvivantes
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+
+@Composable
+fun ReaderScreen(
+    b: Bible,
+    bookId: String,
+    chapter: Int,
+    fontSize: Int,
+    lineFactor: Float,
+    focus: String?,
+    marks: Set<String>,
+    revision: Int,
+    onMenu: () -> Unit,
+    onSearch: () -> Unit,
+    onTextSettings: () -> Unit,
+    onMore: () -> Unit,
+    onChooseBook: () -> Unit,
+    onChooseChapter: () -> Unit,
+    onVerse: (Verse) -> Unit,
+    onNavigate: (String, Int) -> Unit
+) {
+    val ink = LocalInk.current
+    val ctx = LocalContext.current
+    val prefs = remember { ctx.ntPrefs() }
+    val book = b.books.firstOrNull { it.id == bookId } ?: b.books.first()
+    val listState = rememberLazyListState()
+
+    var verses by remember(bookId, chapter) { mutableStateOf<List<Verse>?>(null) }
+    LaunchedEffect(bookId, chapter) { verses = withContext(Dispatchers.IO) { b.chapter(book.id, chapter) } }
+
+    val savedKey = "position.$bookId.$chapter"
+    LaunchedEffect(bookId, chapter, verses, focus) {
+        val rows = verses ?: return@LaunchedEffect
+        val target = rows.indexOfFirst { it.key == focus }
+        val saved = prefs.getInt(savedKey, 0).coerceIn(0, (rows.size - 1).coerceAtLeast(0))
+        listState.scrollToItem(if (target >= 0) target else saved)
+        prefs.edit().putString("book", bookId).putInt("chapter", chapter)
+            .putLong("visit.$bookId.$chapter", System.currentTimeMillis()).apply()
+    }
+    LaunchedEffect(bookId, chapter, verses) {
+        if (verses == null) return@LaunchedEffect
+        snapshotFlow { listState.firstVisibleItemIndex }.collect { prefs.edit().putInt(savedKey, it).apply() }
+    }
+
+    // Temps de lecture : cumulé toutes les 20 s et au départ de l'écran.
+    val lastFlush = remember(bookId, chapter) { longArrayOf(System.currentTimeMillis()) }
+    LaunchedEffect(bookId, chapter) {
+        while (true) {
+            delay(20_000)
+            val now = System.currentTimeMillis()
+            prefs.addReadMillis(bookId, chapter, now - lastFlush[0])
+            lastFlush[0] = now
+        }
+    }
+    DisposableEffect(bookId, chapter) {
+        onDispose {
+            val now = System.currentTimeMillis()
+            prefs.addReadMillis(bookId, chapter, now - lastFlush[0])
+        }
+    }
+
+    val isRead = prefs.getBoolean("read.$bookId.$chapter", false)
+    var readState by remember(bookId, chapter, revision) { mutableStateOf(isRead) }
+
+    Box(Modifier.fillMaxSize().background(ink.bg)) {
+        Column(Modifier.fillMaxSize()) {
+            ReaderBar(
+                bookName = book.name,
+                chapter = chapter,
+                onMenu = onMenu,
+                onSearch = onSearch,
+                onTextSettings = onTextSettings,
+                onMore = onMore,
+                onChooseBook = onChooseBook,
+                onChooseChapter = onChooseChapter
+            )
+            val rows = verses
+            if (rows == null) {
+                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    CircularProgress()
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 18.dp, bottom = 96.dp)
+                ) {
+                    itemsIndexed(rows, key = { _, v -> v.key }) { _, v ->
+                        VerseLine(v, fontSize, lineFactor, focus == v.key, v.key in marks) { onVerse(v) }
+                    }
+                    item("chapter-nav") {
+                        Row(
+                            Modifier.fillMaxWidth().padding(top = 26.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val previous = chapter > 1 || b.books.indexOf(book) > 0
+                            val next = chapter < book.chapters || b.books.indexOf(book) < b.books.lastIndex
+                            if (previous) {
+                                Row(
+                                    Modifier.clip(RoundedCornerShape(50)).clickable {
+                                        if (chapter > 1) onNavigate(bookId, chapter - 1)
+                                        else b.books.getOrNull(b.books.indexOf(book) - 1)?.let { onNavigate(it.id, it.chapters) }
+                                    }.padding(vertical = 8.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(painterResource(R.drawable.ic_chevron_left), null, Modifier.size(18.dp), tint = ink.sub)
+                                    Text("Précédent", color = ink.sub, fontSize = 13.sp, fontFamily = Lora)
+                                }
+                            }
+                            Spacer(Modifier.weight(1f))
+                            if (next) {
+                                Row(
+                                    Modifier.clip(RoundedCornerShape(50)).clickable {
+                                        if (chapter < book.chapters) onNavigate(bookId, chapter + 1)
+                                        else b.books.getOrNull(b.books.indexOf(book) + 1)?.let { onNavigate(it.id, 1) }
+                                    }.padding(vertical = 8.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Suivant", color = ink.sub, fontSize = 13.sp, fontFamily = Lora)
+                                    Icon(painterResource(R.drawable.ic_chevron_right), null, Modifier.size(18.dp), tint = ink.sub)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        MarkReadPill(
+            read = readState,
+            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = 18.dp)
+        ) {
+            val next = !readState
+            prefs.edit().putBoolean("read.$bookId.$chapter", next).apply()
+            readState = next
+        }
+    }
+}
+
+@Composable
+private fun ReaderBar(
+    bookName: String,
+    chapter: Int,
+    onMenu: () -> Unit,
+    onSearch: () -> Unit,
+    onTextSettings: () -> Unit,
+    onMore: () -> Unit,
+    onChooseBook: () -> Unit,
+    onChooseChapter: () -> Unit
+) {
+    val ink = LocalInk.current
+    Box(Modifier.fillMaxWidth().background(ink.bar)) {
+        Row(
+            Modifier
+                .statusBarsPadding()
+                .fillMaxWidth()
+                .height(54.dp)
+                .padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircleIconButton(R.drawable.ic_menu, "Menu", onMenu, ink.text, 40.dp, iconSize = 20.dp)
+            Spacer(Modifier.width(2.dp))
+            BarPill(bookName, onChooseBook)
+            Spacer(Modifier.width(6.dp))
+            BarPill("$chapter", onChooseChapter)
+            Spacer(Modifier.weight(1f))
+            CircleIconButton(R.drawable.ic_search, "Rechercher", onSearch, ink.text, 38.dp, iconSize = 20.dp)
+            CircleIconButton(R.drawable.ic_tune, "Réglages du texte", onTextSettings, ink.text, 38.dp, iconSize = 20.dp)
+            CircleIconButton(R.drawable.ic_more, "Plus", onMore, ink.text, 34.dp, iconSize = 18.dp)
+        }
+    }
+}
+
+@Composable
+private fun BarPill(label: String, onClick: () -> Unit) {
+    val ink = LocalInk.current
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(ink.pill)
+            .clickable(onClick = onClick)
+            .padding(start = 14.dp, end = 10.dp, top = 7.dp, bottom = 7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, color = ink.text, fontSize = 13.sp, fontFamily = Lora, maxLines = 1)
+        Spacer(Modifier.width(4.dp))
+        Icon(painterResource(R.drawable.ic_down), null, Modifier.size(14.dp), tint = ink.text.copy(alpha = .8f))
+    }
+}
+
+@Composable
+private fun VerseLine(
+    v: Verse,
+    fontSize: Int,
+    lineFactor: Float,
+    focused: Boolean,
+    marked: Boolean,
+    onClick: () -> Unit
+) {
+    val ink = LocalInk.current
+    val prefs = localContext().ntPrefs()
+    val markColor = (if (ink.dark) bookmarksDark else bookmarksLight)[prefs.getInt("color.${v.key}", 1).coerceIn(0, 5)]
+    val bg = when {
+        marked -> markColor.copy(alpha = if (ink.dark) .85f else .8f)
+        focused -> ink.accentSoft.copy(alpha = .55f)
+        else -> ink.bg
+    }
+    Text(
+        text = buildAnnotatedString {
+            withStyle(SpanStyle(color = ink.accent, fontSize = (fontSize - 7).sp, fontFamily = Lora, fontWeight = FontWeight.SemiBold)) {
+                append("${v.number}")
+            }
+            withStyle(SpanStyle(color = ink.accent.copy(alpha = .55f))) { append("   ") }
+            append(v.text)
+        },
+        color = ink.text,
+        fontFamily = Lora,
+        fontSize = fontSize.sp,
+        lineHeight = (fontSize * lineFactor).sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(bg)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 9.dp)
+    )
+}
+
+@Composable
+private fun MarkReadPill(read: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val ink = LocalInk.current
+    Row(
+        modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (ink.dark) Color0x4A362A else Color0xF9E3D4)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            painterResource(if (read) R.drawable.ic_check else R.drawable.ic_bookmark),
+            null,
+            Modifier.size(16.dp),
+            tint = if (ink.dark) Color0xF0D8C4 else Color0x5B4230
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            if (read) "Lu" else "Marquer Lu",
+            color = if (ink.dark) Color0xF0D8C4 else Color0x5B4230,
+            fontSize = 12.5.sp,
+            fontFamily = Lora,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+@Composable
+fun CircularProgress() {
+    androidx.compose.material3.CircularProgressIndicator(
+        modifier = Modifier.size(26.dp),
+        strokeWidth = 2.dp,
+        color = LocalInk.current.accent
+    )
+}
+
+val Color0x4A362A = androidx.compose.ui.graphics.Color(0xFF4A362A)
+val Color0xF9E3D4 = androidx.compose.ui.graphics.Color(0xFFF9E3D4)
+val Color0xF0D8C4 = androidx.compose.ui.graphics.Color(0xFFF0D8C4)
+val Color0x5B4230 = androidx.compose.ui.graphics.Color(0xFF5B4230)
